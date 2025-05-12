@@ -2,18 +2,13 @@
 mlx
 mlx-whisper
 
-# Diarization & Alignment (WhisperX pulls these in)
+# Diarization & Alignment
 # Using git version for potentially latest fixes, adjust if stable pip version works
 whisperx @ git+https://github.com/m-bain/whisperX.git@main#egg=whisperx
-# Note: whisperx depends on: torch, torchvision, torchaudio, pyannote.audio, pandas, etc.
-# Listing torch explicitly as it's needed for MPS check.
 torch
 
 # Data Handling
 pandas
 
-# Optional: Environment Variable Loading
+# Environment Variable Loading
 python-dotenv
-
-# Add other direct dependencies if any were missed.
-# Libraries like 'sys', 'os', 'gc', 'time', 'shutil', 'logging', 'threading', 'datetime', 'argparse' are standard library.
