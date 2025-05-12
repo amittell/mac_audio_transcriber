@@ -46,7 +46,7 @@ This Python script, `transcriber_mlx.py`, provides fast audio transcription usin
 
     # Or manually install key components:
     # pip install mlx mlx-whisper pandas python-dotenv torch
-    # pip install git+[https://github.com/m-bain/whisperX.git@main#egg=whisperx](https://github.com/m-bain/whisperX.git@main#egg=whisperx)
+    # pip install git+https://github.com/m-bain/whisperX.git@main#egg=whisperx
     ```
 * **Environment:** Ensure you are in an environment where `mlx` can leverage your Apple Silicon's GPU/ANE and PyTorch (for MPS) is correctly installed for your macOS version.
 
@@ -73,17 +73,18 @@ The script can be configured using a hierarchy (command-line overrides environme
     python transcriber_mlx.py --help
     ```
 2.  **Environment Variables:**
-    * `WHISPERX_PROCESSOR_MODEL_NAME`: Default Whisper model (e.g., `mlx-community/whisper-medium-mlx`).
-    * `WHISPERX_PROCESSOR_LANGUAGE`: Default language (e.g., `en`).
+    * `WHISPERX_PROCESSOR_MODEL_NAME`: Default Whisper model (default: `mlx-community/whisper-small-mlx`).
+    * `WHISPERX_PROCESSOR_LANGUAGE`: Default language (default: `en`).
     * `WHISPERX_PROCESSOR_HF_TOKEN` or `HF_TOKEN`: Hugging Face token.
-    * `WHISPERX_PROCESSOR_OUTPUT_DIR`: Default output directory (e.g., `./transcripts`).
-    * `WHISPERX_PROCESSOR_DIARIZATION_DEVICE`: Default diarization device (`cpu` or `mps`).
+    * `WHISPERX_PROCESSOR_MODEL_DOWNLOAD_ROOT`: Root directory for model downloads.
+    * `WHISPERX_PROCESSOR_OUTPUT_DIR`: Default output directory (default: `.`).
+    * `WHISPERX_PROCESSOR_DIARIZATION_DEVICE`: Default diarization device (default: `mps`).
 3.  **`.env` File:** Create a `.env` file in the script's directory (requires `python-dotenv` installed):
     ```env
-    WHISPERX_PROCESSOR_MODEL_NAME="mlx-community/whisper-large-mlx"
+    WHISPERX_PROCESSOR_MODEL_NAME="mlx-community/whisper-small-mlx"
     WHISPERX_PROCESSOR_LANGUAGE="en"
     HF_TOKEN="your_hugging_face_token_here"
-    WHISPERX_PROCESSOR_OUTPUT_DIR="./my_transcripts"
+    WHISPERX_PROCESSOR_OUTPUT_DIR="."
     WHISPERX_PROCESSOR_DIARIZATION_DEVICE="mps"
     ```
 
@@ -121,17 +122,19 @@ python transcriber_mlx.py <input_audio_file> [options]
 ### Key Command-Line Arguments:
 
 * `input_audio`: Path to the input audio/video file (required).
-* `--output_dir`: Directory to save output files.
-* `--model_name`: MLX Whisper model (HF ID or local path).
-* `--language`: Language code (`en`, `es`, `auto`, etc.).
-* `--diarize`: Enable speaker diarization.
-* `--hf_token`: Your Hugging Face token (required for diarization if not set elsewhere).
-* `--min_speakers`, `--max_speakers`: Optionally guide the number of speakers for diarization.
-* `--diarization_device`: Choose `cpu` or `mps` (default: `cpu`). MPS is experimental.
-* `--no_csv`, `--no_srt`, `--no_txt`: Flags to disable specific output file formats.
-* `--debug`: Enable verbose debug logging.
-* `--initial_prompt`: Optional text to provide as context/prompt to the transcription model.
-* `--print_progress`: Show transcription progress if supported by `mlx-whisper`.
+* `--output_dir`: Directory to save output files (default: `.`).
+* `--model_name`: MLX Whisper model from Hugging Face or local path (default: `mlx-community/whisper-small-mlx`).
+* `--language`: Language code (`en`, `es`, `auto`, etc.) (default: `en`).
+* `--initial_prompt`: Optional text to provide as context/prompt to improve ASR accuracy for specific words or context.
+* `--print_progress`: Print transcription progress from the MLX whisper library.
+* `--debug`: Enable debug level logging for more detailed output, including pyannote logs and attribute inspection.
+* `--diarize`: Enable speaker diarization (uses pyannote.audio via whisperx).
+* `--hf_token`: Hugging Face token for diarization models (can also use environment variables).
+* `--min_speakers`: Min speakers for diarization.
+* `--max_speakers`: Max speakers for diarization.
+* `--diarization_device`: Device for diarization: `cpu` or `mps` (default: `mps`).
+
+* `--no_csv`, `--no_srt`, `--no_txt`: Flags to disable specific output file formats (all enabled by default).
 
 *(Run `python transcriber_mlx.py --help` for the full list and default values.)*
 
@@ -153,5 +156,5 @@ The `_diarized` suffix is added if diarization was successfully applied. Existin
 * **Memory Usage:** Larger Whisper models and long audio files consume significant RAM. Diarization also requires substantial memory.
 * **Hugging Face Token/Permissions:** Diarization will fail without a valid Hugging Face token *and* if you haven't accepted the terms for the specific `pyannote.audio` models on the Hugging Face website.
 * **Diarization Accuracy:** Automated diarization accuracy varies. Using `--min_speakers` and `--max_speakers` can help. Manual correction may be needed for high accuracy (use subtitle editors like Aegisub, etc.).
-* **Heartbeat Log:** During diarization, messages like "Diarization still in progress..." will appear every 30 seconds to indicate the process hasn't hung, especially useful for long CPU runs.
-```
+* **Heartbeat Logging:** During diarization, messages like "Diarization still in progress..." will appear every 30 seconds to indicate the process hasn't hung, especially useful for long CPU runs.
+
