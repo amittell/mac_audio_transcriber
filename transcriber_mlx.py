@@ -36,6 +36,17 @@ from datetime import timedelta
 import shutil
 import time # For timing the process
 import threading # Added for heartbeat
+import json # For action items JSON handling
+import datetime # For timestamp in the report header
+
+# Attempt to import LLM handler for local model usage
+try:
+    from llm_handler import (load_llm_model_and_tokenizer, invoke_llm_mlx, format_gemma_chat_prompt,
+                         INPUT_TOO_LONG_ERROR_INDICATOR, PROMPT_TOKENIZATION_FAILED_INDICATOR, 
+                         GENERATION_OOM_ERROR_INDICATOR)
+    llm_handler_imported = True
+except ImportError:
+    llm_handler_imported = False
 
 # Attempt to load .env file if python-dotenv is installed
 # This initial attempt is basic; more detailed logging occurs after logger setup.
@@ -73,6 +84,78 @@ DEFAULT_HF_TOKEN_SCRIPT = None
 # DEFAULT_MODEL_DOWNLOAD_ROOT_SCRIPT = None # Removed as not used by MLX or this diarization setup
 DEFAULT_OUTPUT_DIR_SCRIPT = "."
 DEFAULT_DIARIZATION_DEVICE_SCRIPT = "mps"
+
+# --- LLM System Prompts and Configuration ---
+CORRECTION_SYSTEM_PROMPT = """You are an expert linguistic editor specializing in refining machine-generated meeting transcripts for maximum accuracy and readability.
+Your objective is to meticulously correct the provided transcript.
+
+Follow these instructions precisely:
+1.  **Correct Errors:** Identify and rectify all grammatical errors, spelling mistakes, punctuation inaccuracies, and incorrect capitalization.
+2.  **Improve Readability:** Enhance sentence structure for clarity. Combine overly fragmented sentences where appropriate and break down run-on sentences to ensure smooth, natural language flow.
+3.  **Maintain Speaker Labels:** The transcript uses speaker labels in the format [SPEAKER_XX] (e.g., [SPEAKER_00], [SPEAKER_01]). These labels are critical and MUST be preserved exactly as they appear before each utterance. Do NOT alter, add, or remove any speaker labels.
+4.  **Handle Disfluencies:** Remove common verbal disfluencies (e.g., "um," "uh," "er," "like," "you know," "so," "well" when used as fillers) UNLESS their removal changes the speaker's intended meaning or conveys a significant hesitation that is contextually important. Strive for a clean, professional, and natural-sounding dialogue.
+5.  **Preserve Content Integrity:** Your role is to correct and refine, NOT to add new information, summarize, or alter the factual content of the transcript. The meaning and intent of the original speakers must be fully preserved.
+6.  **Output Format:** Return ONLY the fully corrected transcript. The output must start directly with the first speaker label or text and end with the last piece of dialogue. Do not include any introductory phrases, concluding remarks, or any text other than the corrected transcript itself."""
+
+SUMMARY_SYSTEM_PROMPT = """You are an AI assistant programmed to be an expert summarizer of meeting transcripts.
+Your task is to generate a concise and objective summary of the provided meeting transcript.
+
+The summary must accurately reflect the content of the transcript and should focus on the following key elements:
+* **Main Topics of Discussion:** Clearly identify the primary subjects that were discussed.
+* **Key Decisions Made:** List any explicit decisions, agreements, or resolutions that were reached during the meeting.
+* **Significant Outcomes/Conclusions:** Detail any important results, conclusions, or takeaways from the discussions.
+* **Action Items (Brief Mention, if any):** If action items are explicitly mentioned as outcomes, briefly note their existence without detailing them (a separate process will extract detailed action items).
+
+Guidelines for the summary:
+1.  **Objectivity:** The summary must be strictly factual and based ONLY on the information present in the transcript. Do not include personal opinions, interpretations, or any information not explicitly stated.
+2.  **Conciseness:** Be brief and to the point. Avoid unnecessary jargon or overly detailed explanations. The length should be appropriate for a high-level overview.
+3.  **Clarity:** Use clear and straightforward language.
+4.  **Output Format:** Return ONLY the summary text. Do not include any introductory phrases (e.g., "Here is the summary:"), concluding remarks, or any text other than the summary itself."""
+
+ACTION_ITEMS_SYSTEM_PROMPT = """You are an AI specializing in meticulous action item extraction from meeting transcripts.
+Your sole responsibility is to identify and structure all explicit tasks, commitments, or actions that require follow-up.
+
+For each identified action item, you MUST provide:
+1.  **Task (string):** A clear, concise description of what needs to be done. This should be a direct reflection of the commitment made in the transcript.
+2.  **Assignee (string or list of strings):** The speaker label(s) (e.g., "[SPEAKER_00]", "[SPEAKER_01]") of the person(s) explicitly assigned or taking responsibility for the task.
+    * If no one is explicitly assigned but context strongly implies an assignee (e.g., someone volunteers), use that speaker label.
+    * If multiple individuals are clearly assigned to the *same specific task*, provide their speaker labels as a JSON list of strings (e.g., ["[SPEAKER_00]", "[SPEAKER_03]"]).
+    * If no assignee can be determined from the transcript, use the string "Unassigned".
+3.  **Deadline (string):** Any mentioned due date, timeframe (e.g., "End of Week", "Next Monday"), or temporal marker for completion.
+    * If no deadline or timeframe is explicitly mentioned, use the string "Not specified".
+
+Output Format:
+* You MUST return the action items as a valid JSON list of objects.
+* Each object in the list represents a single action item and MUST contain exactly three keys: "task", "assignee", and "deadline".
+* The values for these keys must be strings, except for "assignee" which can be a string or a list of strings as specified above.
+
+Example of the required JSON structure:
+[
+  {"task": "Prepare quarterly financial report", "assignee": "[SPEAKER_01]", "deadline": "Next Friday"},
+  {"task": "Send follow-up email to Project Alpha team", "assignee": "[SPEAKER_02]", "deadline": "EOD Today"},
+  {"task": "Coordinate logistics for the upcoming workshop", "assignee": ["[SPEAKER_00]", "[SPEAKER_04]"], "deadline": "By Wednesday COB"}
+]
+
+Important:
+* If no action items are found in the transcript, you MUST return an empty JSON list: `[]`.
+* Do NOT include any text, explanation, or conversational preamble/postamble outside of the JSON output. Your entire response must be the JSON list itself, or an empty list if applicable.
+* Ensure the output is a perfectly valid JSON structure."""
+
+DEFAULT_LLM_MODEL_ID = "mlx-community/gemma-3-4b-it-qat-4bit" # New Default
+
+MODEL_CONTEXT_WINDOWS = {
+    "mlx-community/gemma-3-4b-it-qat-4bit": 128000,
+    "mlx-community/Phi-3-mini-4k-instruct-4bit": 4096,
+    "mlx-community/Mistral-7B-Instruct-v0.2-4bit": 32000,
+    "mlx-community/Mistral-7B-Instruct-v0.3-4bit": 32000, # Assuming same as v0.2, user should verify
+    "mlx-community/Llama-3.1-8B-Instruct-4bit": 128000,
+    # User can add more models here: "huggingface_model_id": context_window_integer
+}
+LLM_PROMPT_RESERVE_TOKENS = 512 # Tokens reserved for system prompt, query structure, and safety margin.
+                              # This is an estimate. For very tight context windows, precise prompt token counting might be needed.
+
+DEFAULT_CORRECTION_MAX_TOKENS = 8000 # Default new tokens for correction if --llm_max_tokens_correction is 0.
+                                   # This should be enough for the LLM to regenerate a fairly long transcript.
 
 
 DEFAULT_MODEL_NAME = os.getenv("WHISPERX_PROCESSOR_MODEL_NAME", DEFAULT_MODEL_NAME_SCRIPT)
@@ -246,9 +329,258 @@ def save_txt(result_with_speakers, output_filename):
         txt_file.write("\n") # Final newline for cleanliness
     logger.info(f"TXT file saved to {output_filename}")
 
+def chunk_text_by_tokens(text: str, tokenizer, max_tokens_per_chunk: int, overlap_tokens: int = 50) -> list[str]:
+    """
+    Splits text into chunks with a maximum token count per chunk, including overlap.
+    Ensures that overlap_tokens is less than max_tokens_per_chunk.
+    """
+    if not text or not tokenizer:
+        logger.warning("chunk_text_by_tokens: Empty text or no tokenizer provided.")
+        return [text] if text else [] # Return original text if it's just empty or tokenizer missing
+
+    if max_tokens_per_chunk <= overlap_tokens:
+        logger.warning(f"chunk_text_by_tokens: max_tokens_per_chunk ({max_tokens_per_chunk}) "
+                       f"must be greater than overlap_tokens ({overlap_tokens}). Will not chunk.")
+        return [text] # Return unchunked text
+
+    all_token_ids = []
+    try:
+        all_token_ids = tokenizer.encode(text)
+    except Exception as e:
+        logger.error(f"Failed to tokenize text for chunking: {e}. Returning text unchunked.", exc_info=True)
+        return [text]
+
+    if not all_token_ids:
+        logger.warning("Text produced no tokens for chunking.")
+        return []
+        
+    chunks_text = []
+    current_pos_idx = 0
+    text_len_tokens = len(all_token_ids)
+
+    while current_pos_idx < text_len_tokens:
+        end_pos_idx = min(current_pos_idx + max_tokens_per_chunk, text_len_tokens)
+        chunk_token_ids_segment = all_token_ids[current_pos_idx:end_pos_idx]
+        
+        if not chunk_token_ids_segment: # Should not happen if loop condition is correct
+            break
+
+        try:
+            # Ensure tokenizer.decode can handle a list of token IDs
+            chunk_text_segment = tokenizer.decode(chunk_token_ids_segment) 
+            if chunk_text_segment and chunk_text_segment.strip():
+                chunks_text.append(chunk_text_segment)
+            elif not chunk_text_segment and chunk_token_ids_segment:
+                logger.warning(f"Failed to decode token chunk segment (tokens: {chunk_token_ids_segment[:10]}...) into text. Skipping this chunk segment.")
+        except Exception as e:
+            logger.warning(f"Error decoding token chunk segment: {e}. Tokens: {chunk_token_ids_segment[:10]}... Skipping this chunk segment.")
+
+        if end_pos_idx == text_len_tokens: # Reached the end of the text
+            break
+        
+        # Advance current_pos, ensuring we don't step back if overlap is large relative to chunk size
+        current_pos_idx += max(1, max_tokens_per_chunk - overlap_tokens) 
+
+        # Safety break if current_pos_idx doesn't advance, to prevent infinite loop
+        if current_pos_idx <= current_pos_idx - max(1, max_tokens_per_chunk - overlap_tokens) and text_len_tokens > 0 :
+            logger.error("Chunking position did not advance. Breaking to prevent infinite loop.")
+            break
+    
+    return [c for c in chunks_text if c.strip()] # Final filter for any empty strings
+
+def format_action_items_for_report(action_items_data, report_format="txt") -> str:
+    """
+    Formats action items for inclusion in the report.
+    'action_items_data' can be a list of dicts (parsed JSON) or a string (error/raw output).
+    'report_format' can be 'txt' or 'md'.
+    """
+    if not action_items_data:
+        return "No action items were extracted or an error occurred during extraction.\n"
+
+    lines = []
+    if isinstance(action_items_data, list) and all(isinstance(item, dict) for item in action_items_data):
+        if not action_items_data: # Empty list from LLM
+            return "No action items identified.\n" if report_format == "txt" else "*No action items identified.*\n"
+        
+        if report_format == "md":
+            lines.append("### Action Items\n")
+            for i, item in enumerate(action_items_data):
+                task = item.get("task", "N/A")
+                assignee = item.get("assignee", "Unassigned")
+                deadline = item.get("deadline", "Not specified")
+                lines.append(f"- **Task {i+1}:** {task}")
+                lines.append(f"  - **Assignee:** {assignee}")
+                lines.append(f"  - **Deadline:** {deadline}")
+            lines.append("\n") # Add a newline for spacing in markdown
+        else: # txt format
+            lines.append("Action Items:\n")
+            for i, item in enumerate(action_items_data):
+                task = item.get("task", "N/A")
+                assignee = item.get("assignee", "Unassigned")
+                deadline = item.get("deadline", "Not specified")
+                lines.append(f"  - Task {i+1}: {task}")
+                lines.append(f"    Assignee: {assignee}")
+                lines.append(f"    Deadline: {deadline}\n")
+    elif isinstance(action_items_data, str): # Error string or raw output
+        if report_format == "md":
+            lines.append("### Action Items (Extraction Note)\n")
+            lines.append("Could not parse action items as structured data. Raw output from LLM:\n")
+            lines.append("```text")
+            lines.append(action_items_data)
+            lines.append("```\n")
+        else: # txt format
+            lines.append("Action Items (Extraction Note):\n")
+            lines.append("Could not parse action items as structured data. Raw output from LLM:\n")
+            lines.append(action_items_data + "\n")
+    else:
+        return "Invalid format for action items data received.\n"
+        
+    return "\n".join(lines)
+
+def generate_llm_report_content(args, llm_results: dict, base_transcript_for_report: str) -> str:
+    """
+    Generates the full content for the combined LLM report.
+    'args' are the command-line arguments.
+    'llm_results' is a dictionary containing 'summary_text', 'action_items_data', 
+                  'corrected_text_available' (boolean), as well as status fields like
+                  'correction_status', 'summary_status', 'action_items_status', and
+                  'model_id_used'.
+    'base_transcript_for_report' is the full transcript text to include (either original or corrected).
+    """
+    report_parts = []
+    fmt = args.llm_report_format
+    now = datetime.datetime.now()
+
+    # --- Construct Header ---
+    header_lines = []
+    model_id_display = llm_results.get('model_id_used') or args.llm_model_id or 'N/A (LLM tasks not run or model failed to load)'
+    
+    if fmt == "md":
+        header_lines.append(f"# LLM Post-Processing Report")
+        header_lines.append(f"**Generated on:** {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        header_lines.append(f"**Input Audio:** `{os.path.basename(args.input_audio)}`")
+        header_lines.append(f"**LLM Model Used:** `{model_id_display}`")
+        header_lines.append("\n## Options Applied:")
+        if args.llm_correct: 
+            status = llm_results.get('correction_status', 'Unknown')
+            header_lines.append(f"- Transcript Correction: Enabled - *{status}*")
+        if args.llm_summarize: 
+            status = llm_results.get('summary_status', 'Unknown')
+            header_lines.append(f"- Summary Generation: Enabled - *{status}*")
+        if args.llm_action_items: 
+            status = llm_results.get('action_items_status', 'Unknown')
+            header_lines.append(f"- Action Item Extraction: Enabled - *{status}*")
+        if not (args.llm_correct or args.llm_summarize or args.llm_action_items):
+            header_lines.append("- No LLM post-processing tasks were selected.")
+    else: # txt format
+        header_lines.append("--- LLM Post-Processing Report ---")
+        header_lines.append(f"Generated on: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        header_lines.append(f"Input Audio: {os.path.basename(args.input_audio)}")
+        header_lines.append(f"LLM Model Used: {model_id_display}")
+        header_lines.append("\nOptions Applied:")
+        if args.llm_correct: 
+            status = llm_results.get('correction_status', 'Unknown')
+            header_lines.append(f"  - Transcript Correction: Enabled - [{status}]")
+        if args.llm_summarize: 
+            status = llm_results.get('summary_status', 'Unknown')
+            header_lines.append(f"  - Summary Generation: Enabled - [{status}]")
+        if args.llm_action_items: 
+            status = llm_results.get('action_items_status', 'Unknown')
+            header_lines.append(f"  - Action Item Extraction: Enabled - [{status}]")
+        if not (args.llm_correct or args.llm_summarize or args.llm_action_items):
+            header_lines.append("  - No LLM post-processing tasks were selected.")
+    report_parts.append("\n".join(header_lines))
+    report_parts.append("\n" + ("---" if fmt == "txt" else "---") + "\n") # Separator
+
+    # --- Conditionally Add Summary ---
+    if args.llm_summarize:
+        if fmt == "md":
+            report_parts.append("## Summary\n")
+            if llm_results.get('summary_text'):
+                # Add status if it's not a simple "Completed" status
+                status = llm_results.get('summary_status', '')
+                if status and not status.startswith('Completed'):
+                    report_parts.append(f"*Status: {status}*\n\n")
+                report_parts.append(llm_results['summary_text'] + "\n")
+            else:
+                status = llm_results.get('summary_status', 'No summary generated')
+                report_parts.append(f"*{status}*\n")
+        else: # txt format
+            report_parts.append("Summary:\n")
+            if llm_results.get('summary_text'):
+                status = llm_results.get('summary_status', '')
+                if status and not status.startswith('Completed'):
+                    report_parts.append(f"[Status: {status}]\n\n")
+                report_parts.append(llm_results['summary_text'] + "\n\n")
+            else:
+                status = llm_results.get('summary_status', 'No summary generated')
+                report_parts.append(f"[{status}]\n\n")
+        report_parts.append(("\n---" if fmt == "txt" else "\n---\n"))
+
+    # --- Conditionally Add Action Items ---
+    if args.llm_action_items:
+        if llm_results.get('action_items_data') is not None: # Check for presence, could be empty list or error string
+            status = llm_results.get('action_items_status', '')
+            if isinstance(llm_results['action_items_data'], str) and llm_results['action_items_data'].startswith('Error:'):
+                # If it's an error string like "Error: Transcript too long..."
+                if fmt == "md":
+                    report_parts.append("## Action Items\n")
+                    report_parts.append(f"*{llm_results['action_items_data']}*\n")
+                else: # txt format
+                    report_parts.append("Action Items:\n")
+                    report_parts.append(f"{llm_results['action_items_data']}\n\n")
+            else:
+                # Normal action items data (JSON parsed or raw text)
+                formatted_items = format_action_items_for_report(llm_results['action_items_data'], report_format=fmt)
+                # Add status note if needed
+                if status and not status.startswith('Completed (JSON parsed)'):
+                    if fmt == "md":
+                        formatted_items = f"*Note: {status}*\n\n" + formatted_items
+                    else:
+                        formatted_items = f"Note: {status}\n\n" + formatted_items
+                report_parts.append(formatted_items)
+        else:
+            # No action items data
+            status = llm_results.get('action_items_status', 'No action items generated')
+            if fmt == "md":
+                report_parts.append("## Action Items\n")
+                report_parts.append(f"*{status}*\n")
+            else:
+                report_parts.append("Action Items:\n")
+                report_parts.append(f"[{status}]\n\n")
+        report_parts.append(("\n---" if fmt == "txt" else "\n---\n"))
+
+    # --- Add Full Transcript ---
+    # The 'base_transcript_for_report' will be the corrected one if correction was run,
+    # otherwise it's the original base transcript loaded for LLM processing.
+    if fmt == "md":
+        transcript_header = "## Full Transcript"
+        if llm_results.get('corrected_text_available'):
+            transcript_header += " (Corrected by LLM)"
+        report_parts.append(transcript_header + "\n")
+        # For potentially long transcripts, consider if Markdown needs special handling,
+        # but usually, it's fine as a large block of text. Could wrap in ```text ... ``` if desired.
+        report_parts.append(base_transcript_for_report + "\n")
+    else: # txt format
+        transcript_header = "Full Transcript"
+        if llm_results.get('corrected_text_available'):
+            transcript_header += " (Corrected by LLM)"
+        report_parts.append(transcript_header + ":\n")
+        report_parts.append(base_transcript_for_report + "\n")
+        
+    return "\n".join(report_parts)
+
 # --- Main Processing Function ---
 def process_audio_mlx(args):
     start_time_total = time.time()
+    
+    # Check if LLM is requested but handler is missing
+    any_llm_task_enabled = args.llm_correct or args.llm_summarize or args.llm_action_items
+    if any_llm_task_enabled and not llm_handler_imported:
+        logger.error("LLM post-processing requested (--llm_correct, --llm_summarize, or --llm_action_items), "
+                    "but llm_handler.py module could not be imported.")
+        logger.error("Ensure llm_handler.py is in the same directory and dependencies (mlx-lm) are installed.")
+        sys.exit(1)
 
     if not os.path.exists(args.input_audio):
         logger.error(f"Input audio file not found: {args.input_audio}"); sys.exit(1)
@@ -415,7 +747,332 @@ def process_audio_mlx(args):
             if "speaker" in segment: diarization_applied_successfully = True; break # Check segment level too
 
     output_prefix = f"{base_output_filename}{'_diarized' if diarization_applied_successfully else ''}"
+    
+    # --- LLM Post-Processing Section (REVISED FOR ADVANCED CONTEXT HANDLING) ---
+    llm_model = None
+    llm_tokenizer = None
+    llm_processing_active = args.llm_correct or args.llm_summarize or args.llm_action_items
+    effective_llm_model_id = args.llm_model_id # User-specified ID, or None
+    current_model_context_window = 0 # Initialize
+    
+    if llm_processing_active:
+        logger.info("--- Starting LLM Post-Processing with Advanced Context Handling ---")
+        
+        if not effective_llm_model_id: # If user did not specify a model ID
+            effective_llm_model_id = DEFAULT_LLM_MODEL_ID # Use the script's default
+            logger.info(f"No --llm_model_id provided. Using default LLM model: {effective_llm_model_id}")
+        else:
+            logger.info(f"User specified LLM model: {effective_llm_model_id}")
 
+        # This check is vital: if after defaulting, we still don't have one (e.g. DEFAULT_LLM_MODEL_ID was empty)
+        if not effective_llm_model_id:
+            logger.error("LLM processing enabled, but no model ID specified and no default model ID is set. Skipping LLM tasks.")
+            llm_processing_active = False
+        else:
+            logger.info(f"Attempting to load LLM model: {effective_llm_model_id}")
+            llm_model, llm_tokenizer = load_llm_model_and_tokenizer(effective_llm_model_id)
+            
+            if not llm_model or not llm_tokenizer:
+                logger.warning(f"Failed to load LLM model '{effective_llm_model_id}'. LLM-dependent tasks will be skipped.")
+                llm_processing_active = False
+            else:
+                logger.info(f"LLM model '{effective_llm_model_id}' loaded successfully.")
+                # Determine context window
+                current_model_context_window = MODEL_CONTEXT_WINDOWS.get(effective_llm_model_id)
+                if not current_model_context_window:
+                    # Heuristic inference from model name (basic)
+                    if '128k' in effective_llm_model_id.lower(): current_model_context_window = 128000
+                    elif '32k' in effective_llm_model_id.lower(): current_model_context_window = 32000
+                    elif '16k' in effective_llm_model_id.lower(): current_model_context_window = 16384
+                    elif '8k' in effective_llm_model_id.lower(): current_model_context_window = 8192
+                    elif '4k' in effective_llm_model_id.lower(): current_model_context_window = 4096
+                    else:
+                        default_fallback_context = 4096 # A common small context as a last resort
+                        logger.warning(
+                            f"Context window for '{effective_llm_model_id}' not found in known models or inferable from name. "
+                            f"Using a default fallback of {default_fallback_context} tokens. "
+                            f"This may lead to errors if incorrect. Consider adding the model to MODEL_CONTEXT_WINDOWS in the script."
+                        )
+                        current_model_context_window = default_fallback_context
+                logger.info(f"Using context window for '{effective_llm_model_id}': {current_model_context_window} tokens.")
+                # Store the model_id that was actually used for the report
+                llm_results_for_report['model_id_used'] = effective_llm_model_id 
+    else: # No LLM tasks were enabled via CLI flags
+        llm_processing_active = False
+        logger.debug("No LLM tasks enabled. Skipping LLM post-processing.")
+    
+    if llm_processing_active: # Check if LLM tasks are enabled AND model loaded successfully
+        logger.info("--- Starting LLM Post-Processing for Combined Report ---")
+        base_txt_transcript_path = os.path.join(args.output_dir, f"{output_prefix}.txt")
+        
+        # This will hold the transcript content, potentially updated by correction
+        transcript_for_llm_and_report = ""
+        llm_results_for_report = {
+            'summary_text': None,
+            'summary_status': "Not run",
+            'action_items_data': None, # Will store parsed JSON list/dict or error string
+            'action_items_status': "Not run",
+            'correction_status': "Not run",
+            'corrected_text_available': False,
+            'model_id_used': None
+        }
+
+        if not os.path.exists(base_txt_transcript_path):
+            logger.warning(f"Base TXT transcript not found at {base_txt_transcript_path}. Cannot perform LLM tasks.")
+        else:
+            try:
+                with open(base_txt_transcript_path, 'r', encoding='utf-8') as f:
+                    transcript_for_llm_and_report = f.read()
+                logger.info(f"Loaded base transcript for LLM processing (length: {len(transcript_for_llm_and_report)} chars).")
+            except Exception as e:
+                logger.error(f"Failed to read base transcript {base_txt_transcript_path}: {e}. Skipping LLM tasks.")
+                transcript_for_llm_and_report = "" # Ensure it's empty
+
+            # 1. Transcript Correction
+            llm_results_for_report['correction_status'] = "Not run" # Initialize status
+            if args.llm_correct and transcript_for_llm_and_report:
+                logger.info("Task: LLM Transcript Correction")
+                user_query_correct = f"Please correct the following meeting transcript:\n\n---\n{transcript_for_llm_and_report}\n---"
+                correction_prompt = format_gemma_chat_prompt(user_query_correct, system_prompt=CORRECTION_SYSTEM_PROMPT)
+                
+                max_c_tokens = args.llm_max_tokens_correction if args.llm_max_tokens_correction > 0 else DEFAULT_CORRECTION_MAX_TOKENS
+                if args.llm_max_tokens_correction == 0:
+                    logger.info(f"Using default max new tokens for correction: {max_c_tokens}.")
+                
+                corrected_text_output = invoke_llm_mlx(llm_model, llm_tokenizer, correction_prompt,
+                                                      model_context_window=current_model_context_window,
+                                                      max_tokens=max_c_tokens, temperature=0.3,
+                                                      verbose_generation=args.debug)
+                
+                if corrected_text_output == INPUT_TOO_LONG_ERROR_INDICATOR:
+                    logger.error("Transcript too long for LLM correction with the current model's context window. Skipping correction.")
+                    llm_results_for_report['correction_status'] = "Skipped: Transcript too long for model context."
+                elif corrected_text_output == PROMPT_TOKENIZATION_FAILED_INDICATOR:
+                    logger.error("Prompt tokenization failed for correction. Skipping correction.")
+                    llm_results_for_report['correction_status'] = "Failed: Prompt tokenization error."
+                elif corrected_text_output == GENERATION_OOM_ERROR_INDICATOR:
+                    logger.error("Out of memory during LLM correction. Skipping correction.")
+                    llm_results_for_report['correction_status'] = "Failed: Generation out of memory."
+                elif corrected_text_output: # Successfully corrected
+                    transcript_for_llm_and_report = corrected_text_output
+                    llm_results_for_report['corrected_text_available'] = True
+                    llm_results_for_report['correction_status'] = "Completed."
+                    logger.info("Transcript correction by LLM successful.")
+                else: # Other error or no content returned
+                    logger.warning("LLM correction did not return content or encountered an unspecified error. Subsequent tasks will use the uncorrected or previously loaded transcript.")
+                    llm_results_for_report['correction_status'] = "Failed or no content returned."
+            elif args.llm_correct and not transcript_for_llm_and_report:
+                llm_results_for_report['correction_status'] = "Skipped: No transcript content."
+
+            # 2. Summary Generation
+            llm_results_for_report['summary_status'] = "Not run" # Initialize status
+            if args.llm_summarize and transcript_for_llm_and_report:
+                logger.info("Task: LLM Summary Generation")
+                  
+                # Effective context for the actual transcript content, reserving space for prompts
+                effective_context_for_content = current_model_context_window - LLM_PROMPT_RESERVE_TOKENS
+                if effective_context_for_content <= 0:
+                    logger.error(f"LLM_PROMPT_RESERVE_TOKENS ({LLM_PROMPT_RESERVE_TOKENS}) is too large for model context window ({current_model_context_window}). Cannot proceed with summarization.")
+                    llm_results_for_report['summary_status'] = "Failed: Prompt reserve exceeds context window."
+                    # Set summary_text_output to None or an error message if needed by report
+                    llm_results_for_report['summary_text'] = "Error: LLM_PROMPT_RESERVE_TOKENS too large for model context."
+
+                else:
+                      summary_text_output = None
+                      try:
+                          transcript_tokens = len(llm_tokenizer.encode(transcript_for_llm_and_report))
+                      except Exception as e:
+                          logger.error(f"Failed to tokenize transcript for summarization length check: {e}. Skipping summarization.", exc_info=True)
+                          llm_results_for_report['summary_status'] = "Failed: Transcript tokenization error."
+                          transcript_tokens = float('inf') # Ensure it triggers chunking or fails if chunking also fails
+
+                      if transcript_tokens <= effective_context_for_content:
+                          logger.info("Transcript fits in context window for single-pass summarization.")
+                          user_query_summary = f"Please summarize the following meeting transcript:\n\n---\n{transcript_for_llm_and_report}\n---"
+                          summary_prompt = format_gemma_chat_prompt(user_query_summary, system_prompt=SUMMARY_SYSTEM_PROMPT)
+                          summary_text_output = invoke_llm_mlx(llm_model, llm_tokenizer, summary_prompt,
+                                                               model_context_window=current_model_context_window,
+                                                               max_tokens=args.llm_max_tokens_summary, temperature=0.7,
+                                                               verbose_generation=args.debug)
+                          if summary_text_output == INPUT_TOO_LONG_ERROR_INDICATOR:
+                              logger.error("Summarization failed: Input unexpectedly too long despite pre-check. This indicates an issue with token estimation or reserve tokens.")
+                              llm_results_for_report['summary_status'] = "Failed: Input too long (unexpected)."
+                              summary_text_output = None
+                          elif summary_text_output in [PROMPT_TOKENIZATION_FAILED_INDICATOR, GENERATION_OOM_ERROR_INDICATOR] or not summary_text_output:
+                              llm_results_for_report['summary_status'] = f"Failed: {summary_text_output if summary_text_output else 'No content returned'}."
+                              summary_text_output = None
+                          else:
+                              llm_results_for_report['summary_status'] = "Completed (single pass)."
+
+                      else: # Transcript is too long, attempt chunking for summary
+                          logger.info(f"Transcript token count ({transcript_tokens}) exceeds effective context for single-pass summary ({effective_context_for_content}). Attempting chunked summarization.")
+                          
+                          # max_tokens_per_chunk should allow room for prompt overhead for *each chunk's summarization call*
+                          # This is the token limit for the *content* of each chunk.
+                          # The prompt for summarizing a chunk will add its own overhead.
+                          # LLM_PROMPT_RESERVE_TOKENS is for the *overall* prompt structure, not per chunk summary prompt.
+                          # Let's set chunk content limit to be safely within effective_context_for_content
+                          # A simple heuristic: half of the effective content window to allow the chunk + its summary prompt to fit.
+                          chunk_content_token_limit = int(effective_context_for_content / 2) 
+                          chunk_content_token_limit = max(256, chunk_content_token_limit) # Ensure chunks are not excessively small
+                          overlap = int(chunk_content_token_limit * 0.15) # 15% overlap
+                          overlap = max(50, overlap) # Ensure a minimum reasonable overlap
+
+                          logger.info(f"Using chunk content token limit for summarization: {chunk_content_token_limit}, overlap: {overlap}")
+
+                          transcript_chunks = chunk_text_by_tokens(transcript_for_llm_and_report, llm_tokenizer,
+                                                                   max_tokens_per_chunk=chunk_content_token_limit,
+                                                                   overlap_tokens=overlap)
+                          if not transcript_chunks:
+                              logger.error("Failed to chunk transcript for summarization, or no chunks produced.")
+                              llm_results_for_report['summary_status'] = "Failed: Chunking error or no chunks."
+                          else:
+                              logger.info(f"Split transcript into {len(transcript_chunks)} chunks for summarization.")
+                              chunk_summaries = []
+                              all_chunks_processed_successfully = True
+                              for i, chunk_content in enumerate(transcript_chunks):
+                                  logger.info(f"Summarizing chunk {i+1}/{len(transcript_chunks)} (length: {len(chunk_content)} chars)")
+                                  user_query_chunk_summary = f"This is part of a longer meeting. Please concisely summarize ONLY this segment of the transcript:\n\n---\n{chunk_content}\n---"
+                                  # System prompt for chunk summary can be slightly different, or reuse main one. Let's reuse.
+                                  chunk_summary_prompt = format_gemma_chat_prompt(user_query_chunk_summary, system_prompt=SUMMARY_SYSTEM_PROMPT)
+                                  
+                                  # Max tokens for summarizing a single chunk: should be less than total summary max tokens
+                                  # and somewhat proportional to chunk size, but capped.
+                                  max_tokens_for_chunk_summary = min(args.llm_max_tokens_summary // 2, 
+                                                                     int(len(llm_tokenizer.encode(chunk_content)) * 0.7) + 100) # Heuristic
+                                  max_tokens_for_chunk_summary = max(150, max_tokens_for_chunk_summary) # Min summary length for a chunk
+                                  max_tokens_for_chunk_summary = min(max_tokens_for_chunk_summary, 2048) # Absolute cap for chunk summary
+
+                                  chunk_summary_text = invoke_llm_mlx(llm_model, llm_tokenizer, chunk_summary_prompt,
+                                                                      model_context_window=current_model_context_window,
+                                                                      max_tokens=max_tokens_for_chunk_summary, temperature=0.6,
+                                                                      verbose_generation=args.debug)
+                                  if chunk_summary_text and chunk_summary_text not in [INPUT_TOO_LONG_ERROR_INDICATOR, PROMPT_TOKENIZATION_FAILED_INDICATOR, GENERATION_OOM_ERROR_INDICATOR]:
+                                      chunk_summaries.append(chunk_summary_text)
+                                      logger.debug(f"Chunk {i+1} summary (first 100 chars): {chunk_summary_text[:100]}")
+                                  else:
+                                      logger.warning(f"Failed to summarize chunk {i+1}. Reason: {chunk_summary_text if chunk_summary_text else 'No content'}. Skipping this chunk's summary.")
+                                      all_chunks_processed_successfully = False # Mark that at least one chunk failed
+                              
+                              if chunk_summaries:
+                                  combined_chunk_summaries = "\n\n---\nNext Segment Summary:\n---\n\n".join(chunk_summaries)
+                                  logger.info(f"Generated {len(chunk_summaries)} chunk summaries. Now generating final summary from combined chunk summaries (total chars: {len(combined_chunk_summaries)}).")
+                                  
+                                  try:
+                                      combined_summaries_tokens = len(llm_tokenizer.encode(combined_chunk_summaries))
+                                  except Exception as e:
+                                      logger.error(f"Failed to tokenize combined chunk summaries for final pass length check: {e}. Using concatenated summaries.", exc_info=True)
+                                      summary_text_output = combined_chunk_summaries
+                                      llm_results_for_report['summary_status'] = "Completed (concatenated chunk summaries due to final pass tokenization error)."
+                                  else:
+                                      if combined_summaries_tokens <= effective_context_for_content:
+                                          user_query_final_summary = (
+                                              "The following are summaries of sequential parts of a longer meeting. "
+                                              "Please synthesize them into one final, coherent, and concise overall meeting summary. "
+                                              "Ensure the final summary flows well and captures the most important points from all segments.\n\n"
+                                              "---\nCombined Segment Summaries:\n---\n"
+                                              f"{combined_chunk_summaries}\n---"
+                                          )
+                                          final_summary_prompt = format_gemma_chat_prompt(user_query_final_summary, system_prompt=SUMMARY_SYSTEM_PROMPT)
+                                          summary_text_output = invoke_llm_mlx(llm_model, llm_tokenizer, final_summary_prompt,
+                                                                               model_context_window=current_model_context_window,
+                                                                               max_tokens=args.llm_max_tokens_summary, temperature=0.7,
+                                                                               verbose_generation=args.debug)
+                                          if summary_text_output and summary_text_output not in [INPUT_TOO_LONG_ERROR_INDICATOR, PROMPT_TOKENIZATION_FAILED_INDICATOR, GENERATION_OOM_ERROR_INDICATOR]:
+                                              llm_results_for_report['summary_status'] = "Completed (chunked with final pass)."
+                                          else:
+                                              logger.warning(f"Final summarization pass failed or returned no content. Reason: {summary_text_output}. Using concatenated chunk summaries as fallback.")
+                                              summary_text_output = combined_chunk_summaries # Fallback
+                                              llm_results_for_report['summary_status'] = f"Completed (concatenated chunk summaries; final pass failed: {summary_text_output if summary_text_output else 'No content'})."
+                                      else:
+                                          logger.warning(f"Combined chunk summaries (tokens: {combined_summaries_tokens}) are too long for a final summarization pass (effective context: {effective_context_for_content}). Using concatenated chunk summaries.")
+                                          summary_text_output = combined_chunk_summaries
+                                          llm_results_for_report['summary_status'] = "Completed (concatenated chunk summaries; too long for final pass)."
+                              elif all_chunks_processed_successfully: # Chunks processed, but all returned empty summaries
+                                  logger.warning("All chunk summaries were empty. No final summary can be generated.")
+                                  llm_results_for_report['summary_status'] = "Failed: All chunk summaries were empty."
+                              else: # Some chunks failed, and no successful summaries to combine
+                                  logger.warning("No chunk summaries were successfully generated due to errors.")
+                                  llm_results_for_report['summary_status'] = "Failed: No chunk summaries generated due to errors."
+                      
+                      # Store the final summary result
+                      if summary_text_output:
+                          llm_results_for_report['summary_text'] = summary_text_output
+                          # Status should have been set by the logic above
+                          logger.info(f"Summary generation by LLM finished. Status: {llm_results_for_report['summary_status']}")
+                      elif 'summary_status' not in llm_results_for_report or llm_results_for_report['summary_status'] == "Not run":
+                          # If no output and status wasn't set by specific failure paths
+                          logger.warning("LLM summarization did not produce output and status not set; marking as failed.")
+                          llm_results_for_report['summary_status'] = "Failed or no content returned."
+            elif args.llm_summarize and not transcript_for_llm_and_report:
+                llm_results_for_report['summary_status'] = "Skipped: No transcript content."
+
+            # 3. Action Item Extraction
+            llm_results_for_report['action_items_status'] = "Not run" # Initialize status
+            if args.llm_action_items and transcript_for_llm_and_report:
+                  logger.info("Task: LLM Action Item Extraction")
+                  user_query_action = f"Please extract action items from the following meeting transcript:\n\n---\n{transcript_for_llm_and_report}\n---"
+                  action_items_prompt = format_gemma_chat_prompt(user_query_action, system_prompt=ACTION_ITEMS_SYSTEM_PROMPT)
+
+                  action_items_raw_output = invoke_llm_mlx(llm_model, llm_tokenizer, action_items_prompt,
+                                                           model_context_window=current_model_context_window,
+                                                           max_tokens=args.llm_max_tokens_action_items, temperature=0.5,
+                                                           verbose_generation=args.debug)
+                  
+                  if action_items_raw_output == INPUT_TOO_LONG_ERROR_INDICATOR:
+                      logger.error("Transcript too long for LLM action item extraction. Skipping.")
+                      llm_results_for_report['action_items_status'] = "Skipped: Transcript too long for model context."
+                      llm_results_for_report['action_items_data'] = "Error: Transcript too long for action item extraction."
+                  elif action_items_raw_output == PROMPT_TOKENIZATION_FAILED_INDICATOR:
+                      logger.error("Prompt tokenization failed for action items. Skipping.")
+                      llm_results_for_report['action_items_status'] = "Failed: Prompt tokenization error."
+                      llm_results_for_report['action_items_data'] = "Error: Prompt tokenization failed."
+                  elif action_items_raw_output == GENERATION_OOM_ERROR_INDICATOR:
+                      logger.error("Out of memory during LLM action item extraction. Skipping.")
+                      llm_results_for_report['action_items_status'] = "Failed: Generation out of memory."
+                      llm_results_for_report['action_items_data'] = "Error: Generation out of memory."
+                  elif action_items_raw_output:
+                      try:
+                          parsed_json_actions = json.loads(action_items_raw_output)
+                          llm_results_for_report['action_items_data'] = parsed_json_actions
+                          llm_results_for_report['action_items_status'] = "Completed (JSON parsed)."
+                          logger.info("Action item extraction by LLM successful and parsed as JSON.")
+                      except json.JSONDecodeError:
+                          logger.warning("LLM output for action items was not valid JSON. Storing raw output.")
+                          llm_results_for_report['action_items_data'] = action_items_raw_output # Store raw string
+                          llm_results_for_report['action_items_status'] = "Completed (raw output, JSON parse failed)."
+                  else: # Other error or no content
+                      logger.warning("LLM action item extraction did not return content or encountered an unspecified error.")
+                      llm_results_for_report['action_items_status'] = "Failed or no content returned."
+            elif args.llm_action_items and not transcript_for_llm_and_report:
+                llm_results_for_report['action_items_status'] = "Skipped: No transcript content."
+            
+            # --- Generate and Save the Combined Report ---
+            if transcript_for_llm_and_report: # Only generate report if there's a transcript to include
+                report_content_str = generate_llm_report_content(args, llm_results_for_report, transcript_for_llm_and_report)
+                report_filename_suffix = f"_llm_report.{args.llm_report_format}"
+                report_full_filename = get_unique_filename(os.path.join(args.actual_llm_output_dir, f"{output_prefix}{report_filename_suffix}"))
+                try:
+                    with open(report_full_filename, 'w', encoding='utf-8') as f:
+                        f.write(report_content_str)
+                    logger.info(f"Combined LLM report saved to: {report_full_filename}")
+                except IOError as e:
+                    logger.error(f"Failed to save combined LLM report: {e}")
+            else:
+                logger.info("Skipping combined LLM report generation as there was no transcript content to process.")
+
+            logger.info(f"--- LLM Post-Processing for Combined Report Finished ---")
+    
+    elif (args.llm_correct or args.llm_summarize or args.llm_action_items) and not llm_model:
+        logger.warning("LLM tasks were requested, but the LLM model failed to load or was not specified. Skipping all LLM post-processing.")
+      
+    # Clean up LLM model when done
+    if llm_model is not None or llm_tokenizer is not None:
+            logger.info("Cleaning up LLM model resources...")
+            del llm_model, llm_tokenizer
+            gc.collect()
+            logger.debug("LLM resources released.")
+    
     if args.save_csv:
         save_csv(result_with_speakers, os.path.join(args.output_dir, f"{output_prefix}.csv"))
     if args.save_srt:
@@ -424,7 +1081,12 @@ def process_audio_mlx(args):
         save_txt(result_with_speakers, os.path.join(args.output_dir, f"{output_prefix}.txt"))
 
     end_time_total = time.time()
-    logger.info(f"Processing of '{args.input_audio}' complete in {timedelta(seconds=int(end_time_total - start_time_total))}. Outputs are in '{args.output_dir}'")
+    # Create output message based on used features
+    output_dirs_msg = f"'{args.output_dir}'"
+    if any_llm_task_enabled and args.actual_llm_output_dir != args.output_dir:
+        output_dirs_msg = f"'{args.output_dir}' (transcript) and '{args.actual_llm_output_dir}' (LLM outputs)"
+    
+    logger.info(f"Processing of '{args.input_audio}' complete in {timedelta(seconds=int(end_time_total - start_time_total))}. Outputs are in {output_dirs_msg}")
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -458,7 +1120,37 @@ if __name__ == "__main__":
     parser.add_argument("--no_txt", action="store_false", dest="save_txt", help="Do not save TXT output.")
     parser.set_defaults(save_csv=True, save_srt=True, save_txt=True)
 
+    # LLM Post-processing arguments
+    parser.add_argument("--llm_correct", action="store_true", help="Enable LLM-based transcript correction. Requires --llm_model_id.")
+    parser.add_argument("--llm_summarize", action="store_true", help="Enable LLM-based summary generation. Requires --llm_model_id.")
+    parser.add_argument("--llm_action_items", action="store_true", help="Enable LLM-based action item extraction. Requires --llm_model_id.")
+    parser.add_argument("--llm_model_id", type=str, default=None, 
+                      help=f"Hugging Face model ID for the MLX-compatible local LLM. "
+                           f"If LLM tasks are enabled and this is not specified, "
+                           f"defaults to: {DEFAULT_LLM_MODEL_ID} (128k context). "
+                           f"Example: 'mlx-community/Phi-3-mini-4k-instruct-4bit' (4k context).")
+    parser.add_argument("--llm_output_dir", type=str, default=None,
+                      help="Directory for LLM-generated output files. Defaults to --output_dir if not specified.")
+    parser.add_argument("--llm_max_tokens_summary", type=int, default=500,
+                      help="Maximum number of tokens for the LLM to generate for summaries.")
+    parser.add_argument("--llm_max_tokens_correction", type=int, default=0,
+                      help="Maximum number of tokens for LLM correction. If 0, estimates based on input length (input_len * 1.5).")
+    parser.add_argument("--llm_max_tokens_action_items", type=int, default=1000,
+                      help="Maximum number of tokens for LLM action item extraction.")
+    parser.add_argument("--llm_report_format", type=str, default="txt", choices=["txt", "md"],
+                      help="Format for the combined LLM post-processing report file ('txt' or 'md'). Default: 'txt'.")
+
     args = parser.parse_args()
+
+    # LLM Argument Validation and Setup
+    args.actual_llm_output_dir = args.llm_output_dir if args.llm_output_dir else args.output_dir
+    if args.actual_llm_output_dir != args.output_dir:
+        os.makedirs(args.actual_llm_output_dir, exist_ok=True)
+
+    any_llm_task_enabled = args.llm_correct or args.llm_summarize or args.llm_action_items
+    # Check removed: This check is no longer needed as we now use DEFAULT_LLM_MODEL_ID if --llm_model_id is not provided
+    # if any_llm_task_enabled and not args.llm_model_id:
+    #    parser.error("--llm_model_id is required when an LLM task (--llm_correct, --llm_summarize, --llm_action_items) is enabled.")
 
     # Configure logging levels based on debug flag
     if args.debug:

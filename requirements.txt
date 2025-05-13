@@ -7,6 +7,9 @@ mlx-whisper
 whisperx @ git+https://github.com/m-bain/whisperX.git@main#egg=whisperx
 torch
 
+# LLM Post-processing
+mlx-lm
+
 # Data Handling
 pandas
 
