@@ -813,7 +813,29 @@ def process_audio_mlx(args):
     
     if llm_processing_active: # Check if LLM tasks are enabled AND model loaded successfully
         logger.info("--- Starting LLM Post-Processing for Combined Report ---")
+        # Check if the transcript file exists
         base_txt_transcript_path = os.path.join(args.output_dir, f"{output_prefix}.txt")
+        
+        # If file doesn't exist, try checking for the file directly using the file listing
+        if not os.path.exists(base_txt_transcript_path):
+            # Try to find any matching transcript files in the output directory
+            try:
+                output_files = os.listdir(args.output_dir)
+                txt_files = [f for f in output_files if f.endswith('.txt')]
+                
+                # Log what files we found for debugging
+                logger.info(f"Looking for transcript in output directory. Found files: {txt_files}")
+                
+                # Check if we have a matching transcript file with the base name
+                base_name = os.path.splitext(os.path.basename(args.input_audio))[0]
+                matching_files = [f for f in txt_files if base_name in f]
+                
+                if matching_files:
+                    # Use the first matching file
+                    base_txt_transcript_path = os.path.join(args.output_dir, matching_files[0])
+                    logger.info(f"Found alternative transcript file: {base_txt_transcript_path}")
+            except Exception as e:
+                logger.warning(f"Error while searching for transcript files: {e}")
         
         # This will hold the transcript content, potentially updated by correction
         transcript_for_llm_and_report = ""

@@ -116,14 +116,39 @@ def invoke_llm_mlx(model, tokenizer, formatted_prompt: str, model_context_window
     logger.debug(f"Sending prompt to LLM (first 200 chars to avoid excessive logging): {formatted_prompt[:200]}...")
     
     try:
+        # Import the proper sampler maker
+        from mlx_lm.sample_utils import make_sampler
+        
+        logger.info(f"Creating sampler with temperature={temperature}")
+        
+        # Create a kwargs dict with the parameters we need
+        gen_kwargs = {
+            "max_tokens": max_tokens,
+            "verbose": verbose_generation
+        }
+        
+        # Use make_sampler to create a proper sampler function
+        # For temperature > 0, we'll use a sampler with temperature and top_p
+        if temperature > 0:
+            sampler = make_sampler(temp=temperature, top_p=0.9)
+            gen_kwargs["sampler"] = sampler
+            logger.info(f"Using temperature sampling with temp={temperature}, top_p=0.9")
+        else:
+            # For temperature=0, make_sampler will return a greedy sampler (argmax)
+            sampler = make_sampler(temp=0)
+            gen_kwargs["sampler"] = sampler
+            logger.info("Using greedy sampling (temperature=0)")
+        
+        logger.info(f"Generating with kwargs: {list(gen_kwargs.keys())}")
+        
+        # Generate the response
         response = generate(
             model,
             tokenizer,
-            prompt=formatted_prompt,
-            max_tokens=max_tokens, # Max *new* tokens to generate
-            temp=temperature,
-            verbose=verbose_generation # mlx-lm's internal verbosity
+            formatted_prompt,
+            **gen_kwargs
         )
+            
         logger.info("LLM generation complete.")
         logger.debug(f"LLM raw response (first 200 chars): {response[:200] if response else 'None'}")
         return response.strip() if response else None # Return None if LLM gives empty response
