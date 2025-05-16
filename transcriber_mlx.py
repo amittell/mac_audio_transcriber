@@ -141,7 +141,7 @@ Important:
 * Do NOT include any text, explanation, or conversational preamble/postamble outside of the JSON output. Your entire response must be the JSON list itself, or an empty list if applicable.
 * Ensure the output is a perfectly valid JSON structure."""
 
-DEFAULT_LLM_MODEL_ID = "mlx-community/gemma-3-4b-it-qat-4bit" # New Default
+DEFAULT_LLM_MODEL_ID = "mlx-community/gemma-3-4b-it-qat-4bit"
 
 MODEL_CONTEXT_WINDOWS = {
     "mlx-community/gemma-3-4b-it-qat-4bit": 128000,
@@ -154,14 +154,13 @@ MODEL_CONTEXT_WINDOWS = {
 LLM_PROMPT_RESERVE_TOKENS = 512 # Tokens reserved for system prompt, query structure, and safety margin.
                               # This is an estimate. For very tight context windows, precise prompt token counting might be needed.
 
-DEFAULT_CORRECTION_MAX_TOKENS = 8000 # Default new tokens for correction if --llm_max_tokens_correction is 0.
+DEFAULT_CORRECTION_MAX_TOKENS = 32000 # Default new tokens for correction if --llm_max_tokens_correction is 0.
                                    # This should be enough for the LLM to regenerate a fairly long transcript.
 
 
 DEFAULT_MODEL_NAME = os.getenv("WHISPERX_PROCESSOR_MODEL_NAME", DEFAULT_MODEL_NAME_SCRIPT)
 DEFAULT_LANGUAGE = os.getenv("WHISPERX_PROCESSOR_LANGUAGE", DEFAULT_LANGUAGE_SCRIPT)
 DEFAULT_HF_TOKEN = os.getenv("WHISPERX_PROCESSOR_HF_TOKEN", DEFAULT_HF_TOKEN_SCRIPT)
-# DEFAULT_MODEL_DOWNLOAD_ROOT = os.getenv("WHISPERX_PROCESSOR_MODEL_DOWNLOAD_ROOT", DEFAULT_MODEL_DOWNLOAD_ROOT_SCRIPT) # Removed
 DEFAULT_OUTPUT_DIR = os.getenv("WHISPERX_PROCESSOR_OUTPUT_DIR", DEFAULT_OUTPUT_DIR_SCRIPT)
 DEFAULT_DIARIZATION_DEVICE = os.getenv("WHISPERX_PROCESSOR_DIARIZATION_DEVICE", DEFAULT_DIARIZATION_DEVICE_SCRIPT)
 
@@ -574,6 +573,17 @@ def generate_llm_report_content(args, llm_results: dict, base_transcript_for_rep
 def process_audio_mlx(args):
     start_time_total = time.time()
     
+    # Initialize llm_results_for_report at the start
+    llm_results_for_report = {
+        'summary_text': None,
+        'summary_status': "Not run",
+        'action_items_data': None,
+        'action_items_status': "Not run",
+        'correction_status': "Not run",
+        'corrected_text_available': False,
+        'model_id_used': None
+    }
+    
     # Check if LLM is requested but handler is missing
     any_llm_task_enabled = args.llm_correct or args.llm_summarize or args.llm_action_items
     if any_llm_task_enabled and not llm_handler_imported:
@@ -807,15 +817,7 @@ def process_audio_mlx(args):
         
         # This will hold the transcript content, potentially updated by correction
         transcript_for_llm_and_report = ""
-        llm_results_for_report = {
-            'summary_text': None,
-            'summary_status': "Not run",
-            'action_items_data': None, # Will store parsed JSON list/dict or error string
-            'action_items_status': "Not run",
-            'correction_status': "Not run",
-            'corrected_text_available': False,
-            'model_id_used': None
-        }
+        # llm_results_for_report was already initialized at the start of the function
 
         if not os.path.exists(base_txt_transcript_path):
             logger.warning(f"Base TXT transcript not found at {base_txt_transcript_path}. Cannot perform LLM tasks.")
@@ -1148,9 +1150,6 @@ if __name__ == "__main__":
         os.makedirs(args.actual_llm_output_dir, exist_ok=True)
 
     any_llm_task_enabled = args.llm_correct or args.llm_summarize or args.llm_action_items
-    # Check removed: This check is no longer needed as we now use DEFAULT_LLM_MODEL_ID if --llm_model_id is not provided
-    # if any_llm_task_enabled and not args.llm_model_id:
-    #    parser.error("--llm_model_id is required when an LLM task (--llm_correct, --llm_summarize, --llm_action_items) is enabled.")
 
     # Configure logging levels based on debug flag
     if args.debug:
