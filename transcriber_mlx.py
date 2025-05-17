@@ -93,8 +93,8 @@ Your objective is to meticulously correct the provided transcript.
 Follow these instructions precisely:
 1.  **Correct Errors:** Identify and rectify all grammatical errors, spelling mistakes, punctuation inaccuracies, and incorrect capitalization.
 2.  **Improve Readability:** Enhance sentence structure for clarity. Combine overly fragmented sentences where appropriate and break down run-on sentences to ensure smooth, natural language flow.
-3.  **Maintain Speaker Labels:** The transcript uses speaker labels in the format [SPEAKER_XX] (e.g., [SPEAKER_00], [SPEAKER_01]). These labels are critical and MUST be preserved exactly as they appear before each utterance. Do NOT alter, add, or remove any speaker labels.
-4.  **Handle Disfluencies:** Remove common verbal disfluencies (e.g., "um," "uh," "er," "like," "you know," "so," "well" when used as fillers) UNLESS their removal changes the speaker's intended meaning or conveys a significant hesitation that is contextually important. Strive for a clean, professional, and natural-sounding dialogue.
+3.  **Maintain Speaker Labels:** The transcript uses speaker labels in the format [SPEAKER_XX] (e.g., [SPEAKER_00], [SPEAKER_01]). These labels are critical and MUST be preserved exactly as they appear before each utterance. Do NOT alter, add, or remove any speaker labels. **Ensure the dialogue flows naturally between speakers.**
+4.  **Handle Disfluencies:** Remove common verbal disfluencies (e.g., "um," "uh," "er," "like," "you know," "so," "well" when used as fillers) UNLESS their removal changes the speaker's intended meaning or conveys a significant hesitation that is contextually important. Strive for a clean, professional, and natural-sounding dialogue. **Avoid repetitive or nonsensical loops in the output.**
 5.  **Preserve Content Integrity:** Your role is to correct and refine, NOT to add new information, summarize, or alter the factual content of the transcript. The meaning and intent of the original speakers must be fully preserved.
 6.  **Output Format:** Return ONLY the fully corrected transcript. The output must start directly with the first speaker label or text and end with the last piece of dialogue. Do not include any introductory phrases, concluding remarks, or any text other than the corrected transcript itself."""
 
@@ -1158,7 +1158,10 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument("input_audio", type=str, help="Path to input audio/video file (e.g., .mp3, .mp4). FFMPEG needed for video.")
+    parser.add_argument("input_audio", type=str, nargs='?', default=None, help="Path to input audio/video file (e.g., .mp3, .mp4). Required if --input_transcript_file is not provided.")
+    parser.add_argument("--input_transcript_file", type=str, default=None,
+                        help="Path to an existing transcript file (e.g., .txt, .srt, .csv) to use for LLM post-processing, skipping ASR and diarization. "
+                             "If provided, --input_audio is not used for transcription.")
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR, help="Directory for output files.")
     parser.add_argument("--model_name", type=str, default=DEFAULT_MODEL_NAME,
                         help="Name of the MLX Whisper model from Hugging Face (e.g., 'mlx-community/whisper-small-mlx') or a local path to a converted MLX model directory.")
